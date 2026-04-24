@@ -25,7 +25,7 @@ DAW → BlackHole 2ch → [DSDHelper-v4] → iFi Zen Air DAC (DoP DSD128)
 
 - macOS 13+ (arm64)
 - [BlackHole 2ch](https://existential.audio/blackhole/) virtual audio driver
-- USB DAC with native DSD / DoP support (tested with iFi Zen Air DAC)
+- USB DAC with native DSD / DoP support (tested with iFi Zen Air DAC — not affiliated with iFi Audio)
 - Xcode Command Line Tools
 
 ## Build
@@ -41,7 +41,11 @@ clang++ -O2 -std=c++17 -o DSDHelper-v4 src/DSDHelper-v4.cpp \
 2. In your DAW, set the output device to **BlackHole 2ch**
 3. Run the converter:
    ```bash
+   # Default (BlackHole 2ch → iFi Zen Air DAC)
    ./DSDHelper-v4
+
+   # Custom devices — use list-devices to find exact names
+   ./DSDHelper-v4 "BlackHole 2ch" "Your DAC Name Here"
    ```
 4. Play audio in your DAW — the DAC LED should show DSD (cyan on iFi)
 5. Press Ctrl+C to stop

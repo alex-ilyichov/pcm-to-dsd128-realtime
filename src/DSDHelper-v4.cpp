@@ -13,8 +13,9 @@
 #define TARGET_DSD_RATE     5644800.0  // DSD128 bit rate
 #define DSD_BITS_PER_FRAME  16         // DSD bits packed per DoP frame
 
-const char* INPUT_DEVICE_NAME  = "BlackHole 2ch";
-const char* OUTPUT_DEVICE_NAME = "iFi (by AMR) HD USB Audio ";
+// Defaults — override via command-line arguments
+const char* DEFAULT_INPUT_DEVICE  = "BlackHole 2ch";
+const char* DEFAULT_OUTPUT_DEVICE = "iFi (by AMR) HD USB Audio ";
 
 // --- Lock-free circular ringbuffer ---
 // Power-of-2 size so index wrapping is a bitmask (no modulo, no locks needed)
@@ -196,17 +197,28 @@ OSStatus OutputCallback(void*,
     return noErr;
 }
 
-int main() {
+int main(int argc, char* argv[]) {
+    const char* inputDeviceName  = DEFAULT_INPUT_DEVICE;
+    const char* outputDeviceName = DEFAULT_OUTPUT_DEVICE;
+
+    if (argc >= 2) inputDeviceName  = argv[1];
+    if (argc >= 3) outputDeviceName = argv[2];
+
+    std::cout << "Input device:  " << inputDeviceName  << std::endl;
+    std::cout << "Output device: " << outputDeviceName << std::endl;
+
     // --- Find devices ---
-    AudioDeviceID inputDevice = getDeviceByName(INPUT_DEVICE_NAME);
+    AudioDeviceID inputDevice = getDeviceByName(inputDeviceName);
     if (inputDevice == kAudioDeviceUnknown) {
-        std::cerr << "BlackHole not found!" << std::endl;
+        std::cerr << "Input device not found: " << inputDeviceName << std::endl;
+        std::cerr << "Run list-devices to see available device names." << std::endl;
         return 1;
     }
 
-    AudioDeviceID dacDevice = getDeviceByName(OUTPUT_DEVICE_NAME);
+    AudioDeviceID dacDevice = getDeviceByName(outputDeviceName);
     if (dacDevice == kAudioDeviceUnknown) {
-        std::cerr << "iFi DAC not found!" << std::endl;
+        std::cerr << "Output device not found: " << outputDeviceName << std::endl;
+        std::cerr << "Run list-devices to see available device names." << std::endl;
         return 1;
     }
 
@@ -299,7 +311,8 @@ int main() {
     AudioUnitInitialize(outputUnit);
     AudioOutputUnitStart(outputUnit);
     std::cout << "iFi DAC output started at " << OUTPUT_SAMPLE_RATE << " Hz (DoP DSD128)." << std::endl;
-    std::cout << "Route your DAW to BlackHole 2ch. Press Ctrl+C to stop." << std::endl;
+    std::cout << "Route your DAW to \"" << inputDeviceName << "\". Press Ctrl+C to stop." << std::endl;
+    std::cout << "Usage: DSDHelper-v4 [input-device] [output-device]" << std::endl;
 
     // Run until killed
     while (true) {
