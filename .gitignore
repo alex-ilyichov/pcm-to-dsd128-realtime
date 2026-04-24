@@ -1,0 +1,16 @@
+# Compiled binaries
+DSDHelper-v4
+DSDH-REW3-fixed
+list-devices
+*.o
+*.dSYM/
+
+# Build dirs
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# macOS
+.DS_Store
