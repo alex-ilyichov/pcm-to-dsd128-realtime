@@ -7,6 +7,11 @@
 #include <thread>
 #include <chrono>
 #include <atomic>
+#include <cstring>
+#include "modulator.h"
+#include "modulator_naive.h"
+#include "modulator_shaped.h"
+#include "modulator_fir7.h"
 
 // --- Constants ---
 #define OUTPUT_SAMPLE_RATE  352800.0   // DSD128 DoP carrier
@@ -49,20 +54,6 @@ struct RingBuffer {
 static RingBuffer ringL;
 static RingBuffer ringR;
 
-// --- Clamp helper ---
-inline float clamp(float v, float lo, float hi) {
-    return v < lo ? lo : (v > hi ? hi : v);
-}
-
-// --- Delta-sigma modulator (5th-order, clamped integrators) ---
-float noise_shaper(float input, float state[5]) {
-    state[0] = clamp(state[0] + input    - state[4], -16.0f, 16.0f);
-    state[1] = clamp(state[1] + state[0] - state[4], -16.0f, 16.0f);
-    state[2] = clamp(state[2] + state[1] - state[4], -16.0f, 16.0f);
-    state[3] = clamp(state[3] + state[2] - state[4], -16.0f, 16.0f);
-    state[4] = (state[3] >= 0.0f) ? 1.0f : -1.0f;
-    return state[4];
-}
 
 // --- DoP frame packer (marker in MSB per DoP spec) ---
 void pack_dop(uint16_t dsd16, uint8_t* out, bool marker) {
@@ -103,12 +94,11 @@ AudioDeviceID getDeviceByName(const char* name) {
 }
 
 // --- Global state ---
-static AudioUnit inputUnit;
-static AudioUnit outputUnit;
-static float state_L[5] = {0};
-static float state_R[5] = {0};
-static bool  marker_toggle = false;
-static double inputSampleRate = 44100.0; // updated after BlackHole format query
+static AudioUnit  inputUnit;
+static AudioUnit  outputUnit;
+static Modulator* modulator     = nullptr;
+static bool       marker_toggle = false;
+static double     inputSampleRate = 44100.0;
 
 // --- Input callback: BlackHole PCM → ringbuffer ---
 OSStatus InputCallback(void*,
@@ -148,20 +138,11 @@ OSStatus OutputCallback(void*,
 {
     uint8_t* buffer = (uint8_t*)ioData->mBuffers[0].mData;
 
-    // Oversample ratio: how many DSD frames per input PCM sample
-    // Input is at BlackHole rate (e.g. 44100), output at 352800
-    // Each output frame = 16 DSD bits, so we consume 1 input sample per
-    // (352800/16) / inputRate input frames. We interpolate by repeating samples.
-    // Simple nearest-neighbour hold for now — good enough to validate the pipeline.
-
     static float  last_L = 0.0f, last_R = 0.0f;
     static double inputPhase = 0.0;
-    // phaseInc = how much of one input sample is consumed per output frame
-    // e.g. 44100/352800 = 0.125 → fetch new input sample every 8 output frames
-    const double phaseInc = inputSampleRate / OUTPUT_SAMPLE_RATE;
+    const  double phaseInc = inputSampleRate / OUTPUT_SAMPLE_RATE;
 
     for (UInt32 frame = 0; frame < inFrames; ++frame) {
-        // Advance phase; when it crosses 1.0 consume the next input sample
         inputPhase += phaseInc;
         if (inputPhase >= 1.0) {
             inputPhase -= 1.0;
@@ -169,17 +150,10 @@ OSStatus OutputCallback(void*,
                 last_L = ringL.pop();
                 last_R = ringR.pop();
             }
-            // else: hold last_L/last_R (underrun)
         }
-        float sample_L = last_L;
-        float sample_R = last_R;
 
-        // Pack 16 DSD bits per frame (LSB-first)
         uint16_t dsd_L = 0, dsd_R = 0;
-        for (int i = 0; i < DSD_BITS_PER_FRAME; ++i) {
-            dsd_L |= (noise_shaper(sample_L, state_L) > 0 ? 1 : 0) << i;
-            dsd_R |= (noise_shaper(sample_R, state_R) > 0 ? 1 : 0) << i;
-        }
+        modulator->process(last_L, last_R, dsd_L, dsd_R);
 
         uint8_t dop_L[3], dop_R[3];
         pack_dop(dsd_L, dop_L, marker_toggle);
@@ -200,12 +174,31 @@ OSStatus OutputCallback(void*,
 int main(int argc, char* argv[]) {
     const char* inputDeviceName  = DEFAULT_INPUT_DEVICE;
     const char* outputDeviceName = DEFAULT_OUTPUT_DEVICE;
+    const char* modulatorName    = "shaped"; // default
 
     if (argc >= 2) inputDeviceName  = argv[1];
     if (argc >= 3) outputDeviceName = argv[2];
+    if (argc >= 4) modulatorName    = argv[3];
+
+    // Select modulator
+    NaiveModulator  naiveMod;
+    ShapedModulator shapedMod;
+    Fir7Modulator   fir7Mod;
+
+    if      (strcmp(modulatorName, "naive")  == 0) modulator = &naiveMod;
+    else if (strcmp(modulatorName, "shaped") == 0) modulator = &shapedMod;
+    else if (strcmp(modulatorName, "fir7")   == 0) modulator = &fir7Mod;
+    else {
+        std::cerr << "Unknown modulator: " << modulatorName << std::endl;
+        std::cerr << "Available: naive, shaped, fir7" << std::endl;
+        return 1;
+    }
+    modulator->reset();
 
     std::cout << "Input device:  " << inputDeviceName  << std::endl;
     std::cout << "Output device: " << outputDeviceName << std::endl;
+    std::cout << "Modulator:     [" << modulator->name() << "] "
+              << modulator->description() << std::endl;
 
     // --- Find devices ---
     AudioDeviceID inputDevice = getDeviceByName(inputDeviceName);
@@ -312,7 +305,7 @@ int main(int argc, char* argv[]) {
     AudioOutputUnitStart(outputUnit);
     std::cout << "iFi DAC output started at " << OUTPUT_SAMPLE_RATE << " Hz (DoP DSD128)." << std::endl;
     std::cout << "Route your DAW to \"" << inputDeviceName << "\". Press Ctrl+C to stop." << std::endl;
-    std::cout << "Usage: DSDHelper-v4 [input-device] [output-device]" << std::endl;
+    std::cout << "Usage: DSDHelper-v4 [input-device] [output-device] [naive|shaped|fir7]" << std::endl;
 
     // Run until killed
     while (true) {
