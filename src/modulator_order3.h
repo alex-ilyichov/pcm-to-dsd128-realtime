@@ -50,8 +50,8 @@ public:
             bitsR[i] = step(xR[i], errR, rngR);
         }
 
-        outL = packBitsLSBFirst(bitsL);
-        outR = packBitsLSBFirst(bitsR);
+        outL = packBitsMSBFirst(bitsL);
+        outR = packBitsMSBFirst(bitsR);
     }
 
     const char* name() const override { return "order3"; }

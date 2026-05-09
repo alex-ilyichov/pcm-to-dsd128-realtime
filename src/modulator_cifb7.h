@@ -59,8 +59,8 @@ public:
             bitsL[i] = (float)step(inL, sL, prevYL, rngL);
             bitsR[i] = (float)step(inR, sR, prevYR, rngR);
         }
-        outL = packBitsLSBFirst(bitsL);
-        outR = packBitsLSBFirst(bitsR);
+        outL = packBitsMSBFirst(bitsL);
+        outR = packBitsMSBFirst(bitsR);
     }
 
     const char* name()        const override { return "cifb7"; }

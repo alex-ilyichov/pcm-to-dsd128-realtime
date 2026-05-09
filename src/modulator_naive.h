@@ -44,8 +44,8 @@ public:
             bitsL[i] = step(xL[i], stateL, rngL);
             bitsR[i] = step(xR[i], stateR, rngR);
         }
-        outL = packBitsLSBFirst(bitsL);
-        outR = packBitsLSBFirst(bitsR);
+        outL = packBitsMSBFirst(bitsL);
+        outR = packBitsMSBFirst(bitsR);
     }
 
     const char* name() const override { return "naive"; }
