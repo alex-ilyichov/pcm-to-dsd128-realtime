@@ -1,0 +1,8 @@
+# Compiled binaries
+DSDHelper-v4
+DSDHelperControl
+test_modulators
+dsd-sine
+
+# macOS
+.DS_Store
