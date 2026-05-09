@@ -35,7 +35,7 @@ DSDHelperControl provides a macOS GUI with a modulator dropdown and runtime para
 
 - macOS 13+ (arm64)
 - [BlackHole 2ch](https://existential.audio/blackhole/) virtual audio driver
-- USB DAC with native DSD / DoP support (tested with iFi USB DACs)
+- USB DAC with native DSD / DoP support (tested with iFi Zen Air DAC -- not affiliated with iFi Audio)
 - Xcode Command Line Tools
 
 ## Build
