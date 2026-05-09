@@ -1,96 +1,128 @@
 # pcm-to-dsd128-realtime
 
-Real-time PCM → DSD128 converter for macOS. Takes a PCM audio stream from a DAW via BlackHole virtual audio device, converts it to DSD128 using a delta-sigma modulator, and streams it to a native DSD-capable USB DAC using DoP (DSD over PCM) framing.
-
-## Status
-
-Working proof of concept. Audio plays correctly at DSD128 with confirmed hardware rate. Known limitation: naive modulator produces audible high-frequency noise floor correlated with the signal — modulator quality improvements are next.
+Real-time PCM to DSD128 converter for macOS. Captures a PCM audio stream via BlackHole virtual audio device, upsamples through a 7-stage halfband FIR interpolator, converts to 1-bit DSD128 using high-order sigma-delta noise shaping, and streams to a native DSD-capable USB DAC using DoP (DSD over PCM) framing.
 
 ## Signal chain
 
 ```
-DAW → BlackHole 2ch → [DSDHelper-v4] → iFi Zen Air DAC (DoP DSD128)
+DAW/Player --> BlackHole 2ch (44.1 kHz)
+  --> DC blocker (1 Hz highpass)
+  --> 7-stage halfband FIR interpolator (44100 --> 5644800 Hz, x128, >120 dB stopband)
+  --> Delta-sigma modulator (1-bit, selectable topology)
+  --> DoP framing (16 DSD bits + marker per 24-bit word)
+  --> USB DAC at 352800 Hz / 24-bit integer (DSD128)
 ```
 
-## How it works
+## Modulators
 
-1. CoreAudio HALOutputUnit captures the PCM stream from BlackHole at 44,100 Hz
-2. A lock-free circular ringbuffer decouples the input and output callbacks
-3. A phase accumulator resamples 44,100 Hz → 352,800 Hz (8× oversampling)
-4. A 5th-order delta-sigma modulator with clamped integrators converts each sample to 16 DSD bits
-5. DoP framing packs 16 DSD bits + marker byte (0x05/0xFA alternating) into 24-bit PCM words
-6. The output HALOutputUnit sends the DoP stream to the DAC at 352,800 Hz / 24-bit integer
+Five delta-sigma modulator variants, selectable at runtime:
+
+| Name | Order | Topology | Noise floor (0-20 kHz) | Notes |
+|------|-------|----------|----------------------|-------|
+| **cifb7** | 7th | CIFB | ~-110 dB, flat to 20 kHz | Best in-band performance. Sequential state update, resonator zeros, H_inf=1.25. |
+| **fir7** | 7th | CRFB | ~-115 dB low, rises above 5 kHz | SoX CLANS-7 coefficients. HP-filtered RPDF dither at d[1]/d[2]/d[3]. |
+| **shaped** | 5th | CRFB | ~-120 dB low, rises above 3 kHz | SoX CLANS-5 coefficients. HP-filtered RPDF dither at d[1]/d[2]. |
+| **order3** | 3rd | Error feedback | ~-95 dB | Simple reference. RPDF at quantizer input. |
+| **naive** | 5th | Distributed feedback | ~-90 dB | Baseline. Known limit cycle at silence. |
+
+All modulators use leaky integrators, state clamping, and MSB-first bit packing per the DoP specification.
+
+## GUI control
+
+DSDHelperControl provides a macOS GUI with a modulator dropdown and runtime parameter tuning. It relaunches the engine process with updated settings.
 
 ## Requirements
 
 - macOS 13+ (arm64)
 - [BlackHole 2ch](https://existential.audio/blackhole/) virtual audio driver
-- USB DAC with native DSD / DoP support (tested with iFi Zen Air DAC — not affiliated with iFi Audio)
+- USB DAC with native DSD / DoP support (tested with iFi USB DACs)
 - Xcode Command Line Tools
 
 ## Build
 
 ```bash
-clang++ -O2 -std=c++17 -o DSDHelper-v4 src/DSDHelper-v4.cpp \
-  -framework AudioToolbox -framework CoreAudio -framework CoreFoundation
+cd src
+
+# Main engine
+clang++ -std=c++17 -O2 -o DSDHelper-v4 DSDHelper-v4.cpp \
+  -framework CoreAudio -framework AudioToolbox -framework CoreFoundation
+
+# GUI control app
+clang++ -std=c++17 -O2 -fobjc-arc -o DSDHelperControl DSDHelperControl.mm \
+  -framework Cocoa -framework CoreFoundation
+
+# Test harness (sine density + fade/limit-cycle detection)
+clang++ -std=c++17 -O2 -o test_modulators test_modulators.cpp -lm
+
+# Device listing utility
+clang++ -std=c++17 -O2 -o list-devices list-devices.cpp \
+  -framework CoreAudio -framework AudioToolbox -framework CoreFoundation
 ```
 
 ## Usage
 
-1. In Audio MIDI Setup, set the DAC to **2 ch 24-bit Integer 352,8 kHz**
-2. In your DAW, set the output device to **BlackHole 2ch**
+1. In Audio MIDI Setup, set the DAC to **2 ch 24-bit Integer 352.8 kHz**
+2. In your DAW or player, set the output device to **BlackHole 2ch**
 3. Run the converter:
    ```bash
-   # Default (BlackHole 2ch → iFi Zen Air DAC)
+   # Default devices, shaped modulator
    ./DSDHelper-v4
 
-   # Custom devices — use list-devices to find exact names
-   ./DSDHelper-v4 "BlackHole 2ch" "Your DAC Name Here"
+   # Specify devices and modulator
+   ./DSDHelper-v4 "BlackHole 2ch" "iFi (by AMR) HD USB Audio " cifb7
+
+   # Use list-devices to find exact CoreAudio device names
+   ./list-devices
    ```
-4. Play audio in your DAW — the DAC LED should show DSD (cyan on iFi)
+4. Play audio -- the DAC should indicate DSD mode
 5. Press Ctrl+C to stop
 
-The binary will print the confirmed DAC hardware rate on startup:
+Startup output:
 ```
+Input device:  BlackHole 2ch
+Output device: iFi (by AMR) HD USB Audio
+Modulator:     [cifb7] 7th-order CIFB (H_inf=1.25 OSR=64), RPDF at s[2]/s[3]
 DAC rate set to 352800 Hz
-DAC confirmed rate: 352800 Hz → DSD128
-BlackHole format: 44100 Hz, 32-bit, 2ch
-Oversample ratio: 8x
+DAC confirmed rate: 352800 Hz -> DSD128
 ```
 
-## Diagnostic utility
+## Testing
 
-To find the exact CoreAudio device name (including any trailing spaces):
 ```bash
-clang++ -O2 -std=c++17 -o list-devices src/list-devices.cpp \
-  -framework AudioToolbox -framework CoreAudio -framework CoreFoundation
-./list-devices
+./test_modulators
 ```
 
-## Sine tone test
+Runs all five modulators against a 440 Hz sine wave (density check) and a fade-to-silence test (limit-cycle detection). Expected: density ~0.50000 for all, no limit cycles detected for shaped/fir7/order3/cifb7.
 
-To validate the DoP pipeline independently of the DAW/BlackHole chain:
-```bash
-clang++ -O2 -std=c++17 -o dsd-sine src/DSDH-rew3.cpp \
-  -framework AudioToolbox -framework CoreAudio -framework CoreFoundation
-./dsd-sine
+## Project structure
+
 ```
-Plays a 1kHz sine wave at DSD128 for 10 seconds.
-
-## Known issues / roadmap
-
-- [ ] Modulator noise shaping coefficients — quantization noise is currently flat across the spectrum; proper NTF coefficients would push it above 20kHz
-- [ ] Linear interpolation or FIR anti-imaging filter before the modulator
-- [ ] Configurable input device and sample rate via command-line arguments
-- [ ] Graceful sample rate detection (currently assumes 44,100 Hz input)
-- [ ] macOS AudioServerPlugin wrapper for true virtual device integration (no BlackHole dependency)
-
-## Archive
-
-`archive/` contains earlier iterations documenting the development process — useful for understanding what failed and why (byte order bugs, missing hardware rate switching, unstable modulator without integrator clamping).
+src/
+  DSDHelper-v4.cpp       Main streaming engine
+  DSDHelperControl.mm    macOS GUI control app
+  modulator.h            Abstract base class + utilities (bit packing, dither, DC block)
+  modulator_shaped.h     5th-order CRFB (SoX CLANS-5)
+  modulator_fir7.h       7th-order CRFB (SoX CLANS-7)
+  modulator_cifb7.h      7th-order CIFB (python-deltasigma coefficients)
+  modulator_order3.h     3rd-order error feedback
+  modulator_naive.h      5th-order distributed feedback baseline
+  interpolator.h         7-stage halfband FIR cascade (x128, Kaiser window)
+  naive_params.h         Runtime-tunable parameters via environment variables
+  test_modulators.cpp    Unit test harness
+  list-devices.cpp       CoreAudio device enumeration utility
+  DSDH-rew3.cpp          Standalone sine tone test
+scripts/
+  gen_halfband_coeffs.py FIR coefficient generator (Kaiser window, beta=12.27)
+```
 
 ## References
 
-- [DoP Standard v1.1](http://dsd-guide.com/dop-open-standard)
-- [CoreAudio HALOutputUnit documentation](https://developer.apple.com/documentation/audiotoolbox)
+- Lipshitz & Vanderkooy, "Why 1-Bit Sigma-Delta Conversion is Unsuitable for High-Quality Applications", AES Convention Paper 5395, 2001
+- Reefman & Janssen, "One-bit Audio: An Overview", Philips Research, 2003
+- Risbo, "Sigma-Delta Modulators -- Stability Analysis and Optimization" (CLANS method), 1994
+- [DoP Open Standard v1.1](http://dsd-guide.com/dop-open-standard)
 - [BlackHole virtual audio driver](https://existential.audio/blackhole/)
+
+## License
+
+CC BY-NC 4.0. See [LICENSE](LICENSE) for details. Commercial use requires prior written agreement.
