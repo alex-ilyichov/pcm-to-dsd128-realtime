@@ -46,7 +46,7 @@ public:
     }
 
 private:
-    static constexpr double INPUT_SCALE = 1.0;
+    static constexpr double INPUT_SCALE = 0.75;
     static constexpr double STATE_CLAMP = 4.0;
     static constexpr double LEAK = 1.0 - 2e-6;
 
