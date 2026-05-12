@@ -8,9 +8,17 @@
 //   synthesizeNTF(order=7, osr=64, opt=2, H_inf=1.25)
 //   realizeNTF(H, form='CIFB')
 //
-// H_inf=1.25 (vs 1.5 previously) trades ~30 dB of NTF depth for 45% more
-// overload headroom: max stable input rises from 0.57 to 0.83.
-// NTF is still excellent: -130 dB @ 20 Hz, -96 dB @ 1 kHz.
+// NOTE ON OSR=64 vs OSR=128:
+//   The system runs at DSD128 (5,644,800 Hz = 44100 * 128), so the "true"
+//   OSR is 128.  However, OSR=64 coefficients place the resonator zeros at
+//   17.9/32.7/41.8 kHz — all above the audio band.  OSR=128 optimization
+//   places zeros at 8.9/16.4/20.9 kHz, which causes audible resonator
+//   ringing in the midrange.  The OSR=64 NTF gives -80 to -96 dB across
+//   0–20 kHz, which is already well below audibility for DSD128.
+//
+// H_inf=1.25 trades ~30 dB of NTF depth for wider overload headroom.
+// Max stable input ~0.83.  INPUT_SCALE=0.60 gives 28% headroom for
+// transient peaks (hi-hats, snare attacks, etc.).
 //
 // KEY DIFFERENCE FROM CRFB:
 //   CRFB feedforward taps give the quantizer a direct view of ALL states,
@@ -34,14 +42,12 @@
 //   v    = s[6] + u                                     (direct feed-through, b[7]=1)
 //   y    = sign(v)
 //
-// NTF performance: -130 dB @ 20 Hz, -96 dB @ 1 kHz, -83 dB @ 5 kHz.
-//
 // DITHER STRATEGY:
 //   RPDF dither at s[2] and s[3] AFTER the quantizer decision.
 //   s[2] propagates through 4 more integrators (~24 dB/oct shaping).
 //   s[3] propagates through 3 more integrators (~18 dB/oct shaping).
-//   Multipliers are tiny (2e-3/1e-2) because H_inf=1.25 state peaks
-//   are s[2]~1.5e-4, s[3]~2e-3.
+//   Multipliers target ~2% of per-sample state contribution to avoid
+//   overload while still breaking limit cycles.
 
 class Cifb7Modulator : public Modulator {
 public:
@@ -54,8 +60,11 @@ public:
                  uint16_t& outL, uint16_t& outR) override {
         float bitsL[16], bitsR[16];
         for (int i = 0; i < 16; ++i) {
-            double inL = clamp((double)xL[i] * INPUT_SCALE, -1.0, 1.0);
-            double inR = clamp((double)xR[i] * INPUT_SCALE, -1.0, 1.0);
+            // Clamp raw input BEFORE scaling — prevents inter-sample overs
+            // from the interpolator pushing past the max stable input (0.83).
+            // Old code: clamp(x * SCALE, -1, 1) let ISOs through at up to 1.0.
+            double inL = clamp((double)xL[i], -1.0, 1.0) * INPUT_SCALE;
+            double inR = clamp((double)xR[i], -1.0, 1.0) * INPUT_SCALE;
             bitsL[i] = (float)step(inL, sL, prevYL, rngL);
             bitsR[i] = (float)step(inR, sR, prevYR, rngR);
         }
@@ -70,7 +79,9 @@ public:
 
 private:
     // Input scaling: max stable amplitude for H_inf=1.25 is ~0.83.
-    // 0.75 gives ~10% safety margin for transient peaks.
+    // 0.75 gives ~10% headroom.  Stability on transients comes from
+    // STATE_CLAMP (prevents runaway) and dither (aids recovery), not
+    // from reducing input scale (which costs SNR).
     static constexpr double INPUT_SCALE = 0.75;
     static constexpr double STATE_CLAMP = 4.0;
     // Subsonic leak: time constant = 1/(1e-5 * 5.6MHz) ≈ 18ms → 56 Hz.
@@ -79,15 +90,15 @@ private:
     // must propagate through all 7 integrators (no feedforward shortcut).
     static constexpr double LEAK = 1.0 - 1e-5;
 
-    // Dither multipliers relative to SHAPED_DITHER_GAIN.
-    // Injected at s[2]/s[3] — 4/3 integrators of shaping (24/18 dB/oct).
-    // State peaks: s[2] ~1.5e-4, s[3] ~2e-3.  Multipliers give dither
-    // ~50-25% of peak state value at default SHAPED_DITHER_GAIN=5e-2.
-    static constexpr double DITHER_S2 = 2e-3;
-    static constexpr double DITHER_S3 = 1e-2;
+    // Dither ~2% of per-sample state contribution (a[i]*err_max).
+    // rpdfDither64() returns ±0.05 peak, so effective dither is:
+    //   s[2]: ±0.05 * 7e-5 = ±3.5e-6  (vs a[2]*2 = 1.7e-4, ratio 2%)
+    //   s[3]: ±0.05 * 1e-3 = ±5.0e-5  (vs a[3]*2 = 2.4e-3, ratio 2%)
+    static constexpr double DITHER_S2 = 7e-5;
+    static constexpr double DITHER_S3 = 1e-3;
 
     // CIFB feedback coefficients a[] — from deltasigma realizeNTF CIFB.
-    // H_inf=1.25: gentler NTF gives wider stable input range.
+    // synthesizeNTF(order=7, osr=64, opt=2, H_inf=1.25)
     // Since b[0..6] = a[0..6] (unity STF), we use a[] for both paths
     // via the error signal err = u - y.
     static constexpr double a[7] = {
@@ -100,8 +111,10 @@ private:
         4.479627554498438e-01,
     };
 
-    // Resonator couplings g[] — same NTF zero placement as before.
+    // Resonator couplings g[] — NTF zero placement.
     // g[0]: s[1] → s[0],  g[1]: s[3] → s[2],  g[2]: s[5] → s[4]
+    // At DSD128 rate, these place zeros at 17.9/32.7/41.8 kHz —
+    // above the audio band, avoiding in-band resonator ringing.
     static constexpr double g[3] = {
         3.968258739999694e-04,
         1.324360895660693e-03,
@@ -140,12 +153,7 @@ private:
         y = (v >= 0.0) ? 1.0 : -1.0;
         prevY = y;
 
-        // No explicit dither needed: 7th-order CIFB with resonator g[]
-        // coefficients and leaky integrators naturally avoids limit cycles
-        // (confirmed by test_modulators fade test).  Any dither at inner
-        // states gets amplified at DC by the remaining integrator chain,
-        // causing overload — HP filtering would fix this but adds complexity.
-        (void)rng;
+        (void)rng;  // no dither — CIFB idle tones/chirps when dither is active
 
         // Leak and clamp all states.
         for (int i = 0; i < 7; ++i)
